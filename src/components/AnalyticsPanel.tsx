@@ -8,6 +8,7 @@ import {
   RefreshCw, ArrowRight, Clock, Laptop, Smartphone, Globe, HelpCircle, 
   X, ChevronLeft, ChevronRight, AlertCircle, ThumbsUp, ThumbsDown, Filter, Info
 } from "lucide-react";
+import { parseJsonResponse } from "../utils/api.ts";
 
 interface AnalyticsPanelProps {
   token: string;
@@ -174,14 +175,10 @@ export default function AnalyticsPanel({ token }: AnalyticsPanelProps) {
         fetch(`/api/admin/analytics/charts?${qParams}`, { headers: { Authorization: `Bearer ${token}` } }),
       ]);
 
-      if (!overviewRes.ok || !failedRes.ok || !chartsRes.ok) {
-        throw new Error("One or more analytics services failed to respond.");
-      }
-
       const [overviewData, failedData, chartsData] = await Promise.all([
-        overviewRes.json(),
-        failedRes.json(),
-        chartsRes.json(),
+        parseJsonResponse(overviewRes),
+        parseJsonResponse(failedRes),
+        parseJsonResponse(chartsRes),
       ]);
 
       setOverview(overviewData);
@@ -203,8 +200,7 @@ export default function AnalyticsPanel({ token }: AnalyticsPanelProps) {
       const res = await fetch(`/api/admin/analytics/students?${qParams}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-      if (!res.ok) throw new Error("Failed to load student metrics listing.");
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       
       // Client-side search filtering on the paginated block for fine-grained UX
       let filteredStudents = data.students || [];
@@ -232,10 +228,8 @@ export default function AnalyticsPanel({ token }: AnalyticsPanelProps) {
       const res = await fetch("/api/admin/analytics/live", {
         headers: { Authorization: `Bearer ${token}` }
       });
-      if (res.ok) {
-        const data = await res.json();
-        setLiveEvents(data);
-      }
+      const data = await parseJsonResponse(res);
+      setLiveEvents(data);
     } catch (err) {
       console.error("Live poll feed failed:", err);
     }
@@ -249,8 +243,7 @@ export default function AnalyticsPanel({ token }: AnalyticsPanelProps) {
       const res = await fetch(`/api/admin/analytics/students/${id}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-      if (!res.ok) throw new Error("Could not load student-specific analytics.");
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       setStudentDetail(data);
     } catch (err) {
       console.error("Single student analytics details failed:", err);

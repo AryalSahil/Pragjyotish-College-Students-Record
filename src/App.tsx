@@ -12,6 +12,7 @@ import AdminLogin from "./components/AdminLogin.tsx";
 import AdminPanel from "./components/AdminPanel.tsx";
 import StudentProfile from "./components/StudentProfile.tsx";
 import ErrorBoundary from "./components/ErrorBoundary.tsx";
+import { parseJsonResponse } from "./utils/api.ts";
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<string>("home");
@@ -52,7 +53,7 @@ export default function App() {
 
     // Load public configurations
     fetch("/api/public/config")
-      .then((res) => res.json())
+      .then((res) => parseJsonResponse(res))
       .then((data) => {
         if (data.collegeName) setCollegeName(data.collegeName);
         if (data.departmentName) setDepartmentName(data.departmentName);
@@ -67,10 +68,7 @@ export default function App() {
       fetch("/api/admin/verify", {
         headers: { Authorization: `Bearer ${storedToken}` },
       })
-        .then((res) => {
-          if (!res.ok) throw new Error("Token verification failed");
-          return res.json();
-        })
+        .then((res) => parseJsonResponse(res))
         .then((data) => {
           if (data.valid) {
             setToken(storedToken);

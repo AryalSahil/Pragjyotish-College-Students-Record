@@ -3,6 +3,7 @@ import { Search, Loader2, AlertCircle, AlertTriangle, ChevronLeft, ChevronRight,
 import { Student } from "../types.ts";
 import StudentCard from "./StudentCard.tsx";
 import ErrorBoundary from "./ErrorBoundary.tsx";
+import { parseJsonResponse } from "../utils/api.ts";
 
 // Helper to generate anonymous visitor/session IDs
 export const getVisitorIds = () => {
@@ -65,10 +66,7 @@ export default function SearchStudents({
   // Load public batches for filter dropdown
   useEffect(() => {
     fetch("/api/public/batches")
-      .then((res) => {
-        if (!res.ok) throw new Error("Failed to load batches");
-        return res.json();
-      })
+      .then((res) => parseJsonResponse(res))
       .then((data) => {
         if (Array.isArray(data)) {
           setBatches(data);
@@ -96,19 +94,7 @@ export default function SearchStudents({
     };
 
     fetch(url, { headers })
-      .then(async (res) => {
-        if (!res.ok) {
-          let errMsg = "Unable to load students. Please try again.";
-          try {
-            const errData = await res.json();
-            if (errData?.error) errMsg = errData.error;
-          } catch {
-            // Ignore JSON parse error on non-200 responses
-          }
-          throw new Error(errMsg);
-        }
-        return res.json();
-      })
+      .then((res) => parseJsonResponse(res))
       .then((data) => {
         // Discard stale responses from earlier queries
         if (currentFetchId !== activeFetchId.current) return;

@@ -6,6 +6,7 @@ import {
 import QRCode from "qrcode";
 import { Student } from "../types.ts";
 import { getVisitorIds } from "./SearchStudents.tsx";
+import { parseJsonResponse } from "../utils/api.ts";
 
 interface StudentProfileProps {
   studentId: number;
@@ -50,7 +51,7 @@ export default function StudentProfile({
   // Load configuration
   useEffect(() => {
     fetch("/api/public/config")
-      .then((res) => res.json())
+      .then((res) => parseJsonResponse(res))
       .then((data) => {
         if (data && typeof data.enablePrivateFields !== "undefined") {
           setEnablePrivateFields(data.enablePrivateFields);
@@ -78,13 +79,7 @@ export default function StudentProfile({
     }
 
     fetch(url, { headers })
-      .then(async (res) => {
-        if (!res.ok) {
-          const data = await res.json();
-          throw new Error(data.error || "Failed to load student details");
-        }
-        return res.json();
-      })
+      .then((res) => parseJsonResponse(res))
       .then((data) => {
         setStudent(data);
         setEditForm(data);
@@ -128,10 +123,7 @@ export default function StudentProfile({
         body: JSON.stringify(editForm)
       });
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to update student records");
-      }
+      await parseJsonResponse(res);
 
       setSaveSuccess(true);
       setIsEditing(false);
@@ -166,10 +158,7 @@ export default function StudentProfile({
         }
       });
 
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || "Failed to delete student record");
-      }
+      await parseJsonResponse(res);
 
       if (onDeleteSuccess) {
         onDeleteSuccess();

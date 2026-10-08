@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { Lock, Mail, Loader2, AlertCircle, ShieldAlert } from "lucide-react";
+import { parseJsonResponse } from "../utils/api.ts";
 
 interface AdminLoginProps {
   onLoginSuccess: (token: string, admin: { email: string; role: string }) => void;
@@ -30,11 +31,7 @@ export default function AdminLogin({ onLoginSuccess, collegeName }: AdminLoginPr
         body: JSON.stringify({ password }),
       });
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Administrative authentication failed.");
-      }
-
+      const data = await parseJsonResponse(res);
       onLoginSuccess(data.token, data.admin);
     } catch (err: any) {
       console.error("Login submission error:", err);

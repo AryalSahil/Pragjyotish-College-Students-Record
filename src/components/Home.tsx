@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Search, GraduationCap, Users, ArrowRight, ShieldCheck, HelpCircle } from "lucide-react";
+import { parseJsonResponse } from "../utils/api.ts";
 
 interface HomeProps {
   setCurrentTab: (tab: string) => void;
@@ -16,7 +17,7 @@ export default function Home({ setCurrentTab, setSearchQuery, collegeName, depar
   useEffect(() => {
     // Fetch total active student count from real PostgreSQL database
     fetch("/api/public/students/count")
-      .then((res) => res.json())
+      .then((res) => parseJsonResponse(res))
       .then((data) => {
         setStudentCount(data.count);
         setLoading(false);

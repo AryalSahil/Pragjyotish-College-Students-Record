@@ -31,10 +31,14 @@ import {
   Search,
   BookOpen,
   Calendar,
-  Menu
+  Menu,
+  Download,
+  Upload,
+  ChevronDown
 } from "lucide-react";
 import { Student, ImportRecord, ActivityLog, SystemSettings } from "../types.ts";
 import AnalyticsPanel from "./AnalyticsPanel.tsx";
+import { parseJsonResponse } from "../utils/api.ts";
 
 interface AdminPanelProps {
   token: string;
@@ -112,6 +116,35 @@ export default function AdminPanel({
   const [studentModalMode, setStudentModalMode] = useState<"add" | "edit" | "view" | null>(null);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
 
+  // CSV Export States
+  const [exportingCSV, setExportingCSV] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exportFeedback, setExportFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+
+  // CSV Student Upload States
+  const [csvUploadModalOpen, setCsvUploadModalOpen] = useState(false);
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [csvAnalyzing, setCsvAnalyzing] = useState(false);
+  const [csvConfirming, setCsvConfirming] = useState(false);
+  const [csvError, setCsvError] = useState<string | null>(null);
+  const [csvPreviewTab, setCsvPreviewTab] = useState<"all" | "new" | "updated" | "duplicate" | "invalid">("all");
+  const [csvPreview, setCsvPreview] = useState<{
+    fileName: string;
+    totalRecords: number;
+    newCount: number;
+    updatedCount: number;
+    duplicateCount: number;
+    invalidCount: number;
+    preview: {
+      newRecords: any[];
+      updatedRecords: any[];
+      duplicateRecords: any[];
+      invalidRecords: any[];
+    };
+  } | null>(null);
+  const csvFileInputRef = useRef<HTMLInputElement>(null);
+
   // Semester & Batch filters and options
   const [studentsSemesterFilter, setStudentsSemesterFilter] = useState("");
   const [studentsBatchFilter, setStudentsBatchFilter] = useState("");
@@ -184,7 +217,7 @@ export default function AdminPanel({
     fetch("/api/admin/batches", {
       headers: { Authorization: `Bearer ${token}` }
     })
-      .then((res) => res.json())
+      .then((res) => parseJsonResponse(res))
       .then((data) => {
         if (Array.isArray(data)) {
           setBatchesList(data);
@@ -232,12 +265,23 @@ export default function AdminPanel({
     return () => clearTimeout(delayDebounce);
   }, [studentsSearch]);
 
+  // Click outside to close CSV Export menu
+  useEffect(() => {
+    const handleOutsideClick = (event: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
+        setExportMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, []);
+
   const fetchDashboardStats = () => {
     setStatsLoading(true);
     fetch("/api/admin/stats", {
       headers: { Authorization: `Bearer ${token}` }
     })
-      .then((res) => res.json())
+      .then((res) => parseJsonResponse(res))
       .then((data) => {
         setStats(data);
         setStatsLoading(false);
@@ -252,7 +296,7 @@ export default function AdminPanel({
     fetch("/api/admin/filter-options", {
       headers: { Authorization: `Bearer ${token}` }
     })
-      .then((res) => res.json())
+      .then((res) => parseJsonResponse(res))
       .then((data) => {
         if (!data.error) {
           setFilterOptions({
@@ -282,7 +326,7 @@ export default function AdminPanel({
     fetch(`/api/admin/students?search=${searchParam}&gender=${studentsGenderFilter}&category=${studentsCategoryFilter}&programme=${progParam}&major=${majorParam}&minor=${minorParam}&admissionCategory=${admCatParam}&status=${statusParam}&semester=${semesterParam}&batch=${batchParam}&page=${studentsPage}&limit=${studentsLimit}`, {
       headers: { Authorization: `Bearer ${token}` }
     })
-      .then((res) => res.json())
+      .then((res) => parseJsonResponse(res))
       .then((data) => {
         setStudentsList(data.students || []);
         setStudentsTotal(data.total || 0);
@@ -299,7 +343,7 @@ export default function AdminPanel({
     fetch("/api/admin/imports", {
       headers: { Authorization: `Bearer ${token}` }
     })
-      .then((res) => res.json())
+      .then((res) => parseJsonResponse(res))
       .then((data) => {
         setImportHistory(data);
         setHistoryLoading(false);
@@ -315,7 +359,7 @@ export default function AdminPanel({
     fetch("/api/admin/logs", {
       headers: { Authorization: `Bearer ${token}` }
     })
-      .then((res) => res.json())
+      .then((res) => parseJsonResponse(res))
       .then((data) => {
         setActivityLogsList(data);
         setLogsLoading(false);
@@ -331,7 +375,7 @@ export default function AdminPanel({
     fetch("/api/admin/settings", {
       headers: { Authorization: `Bearer ${token}` }
     })
-      .then((res) => res.json())
+      .then((res) => parseJsonResponse(res))
       .then((data) => {
         setSettingsForm({
           collegeName: data.collegeName,
@@ -401,10 +445,7 @@ export default function AdminPanel({
         body: JSON.stringify(studentForm)
       });
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to save student record");
-      }
+      await parseJsonResponse(res);
 
       setStudentModalMode(null);
       fetchStudents();
@@ -427,14 +468,180 @@ export default function AdminPanel({
         headers: { Authorization: `Bearer ${token}` }
       });
 
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || "Failed to delete record");
-      }
+      await parseJsonResponse(res);
 
       fetchStudents();
     } catch (err: any) {
       alert(err.message || "Error deleting student");
+    }
+  };
+
+  // CSV Export for Student Records (Administrative Backups)
+  const handleDownloadStudentsCSV = async (scope: "filtered" | "all") => {
+    setExportingCSV(true);
+    setExportMenuOpen(false);
+    setExportFeedback(null);
+
+    const searchParam = encodeURIComponent(studentsSearch);
+    const progParam = encodeURIComponent(studentsProgrammeFilter);
+    const majorParam = encodeURIComponent(studentsMajorFilter);
+    const minorParam = encodeURIComponent(studentsMinorFilter);
+    const admCatParam = encodeURIComponent(studentsAdmissionCategoryFilter);
+    const statusParam = encodeURIComponent(studentsStatusFilter);
+    const semesterParam = encodeURIComponent(studentsSemesterFilter);
+    const batchParam = encodeURIComponent(studentsBatchFilter);
+
+    const queryParams = `scope=${scope}&search=${searchParam}&gender=${studentsGenderFilter}&category=${studentsCategoryFilter}&programme=${progParam}&major=${majorParam}&minor=${minorParam}&admissionCategory=${admCatParam}&status=${statusParam}&semester=${semesterParam}&batch=${batchParam}`;
+
+    try {
+      const res = await fetch(`/api/admin/students/export?${queryParams}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || "Failed to generate CSV backup");
+      }
+
+      const blob = await res.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      const today = new Date().toISOString().split("T")[0];
+      link.download = `students_${scope === "all" ? "full_backup" : "filtered_records"}_${today}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(downloadUrl);
+
+      setExportFeedback({
+        type: "success",
+        message: `Successfully extracted ${scope === "all" ? "full database backup" : `${studentsTotal} filtered student records`} to CSV.`
+      });
+      setTimeout(() => setExportFeedback(null), 5000);
+    } catch (err: any) {
+      console.error("CSV Export error:", err);
+      setExportFeedback({
+        type: "error",
+        message: err.message || "Failed to download student records CSV."
+      });
+      setTimeout(() => setExportFeedback(null), 6000);
+    } finally {
+      setExportingCSV(false);
+    }
+  };
+
+  // CSV Student Upload Handlers (for Student section)
+  const handleDownloadCsvTemplate = async () => {
+    try {
+      const res = await fetch("/api/admin/students/csv-template", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error("Failed to download CSV template");
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "student_import_template.csv";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert(err.message || "Failed to download CSV template");
+    }
+  };
+
+  const handleSelectCsvFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      if (!file.name.toLowerCase().endsWith(".csv")) {
+        setCsvError("Invalid file format. Please upload a .csv file.");
+        return;
+      }
+      setCsvFile(file);
+      setCsvError(null);
+      setCsvPreview(null);
+    }
+  };
+
+  const handleAnalyzeCsv = async () => {
+    if (!csvFile) {
+      setCsvError("Please select a CSV file first.");
+      return;
+    }
+
+    setCsvAnalyzing(true);
+    setCsvError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", csvFile);
+
+      const res = await fetch("/api/admin/students/upload-csv-preview", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`
+        },
+        body: formData
+      });
+
+      const data = await parseJsonResponse(res);
+
+      setCsvPreview(data);
+      setCsvPreviewTab("all");
+    } catch (err: any) {
+      console.error("CSV Preview error:", err);
+      setCsvError(err.message || "Failed to analyze CSV file");
+    } finally {
+      setCsvAnalyzing(false);
+    }
+  };
+
+  const handleConfirmCsvImport = async () => {
+    if (!csvPreview) return;
+
+    setCsvConfirming(true);
+    setCsvError(null);
+
+    try {
+      const res = await fetch("/api/admin/students/upload-csv-confirm", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          fileName: csvPreview.fileName,
+          preview: csvPreview.preview
+        })
+      });
+
+      const data = await parseJsonResponse(res);
+
+      setExportFeedback({
+        type: "success",
+        message: `Successfully imported CSV: ${data.newCount} new students created, ${data.updatedCount} updated, ${data.duplicateCount} duplicate records skipped.`
+      });
+      setTimeout(() => setExportFeedback(null), 6000);
+
+      // Close modal & reset state
+      setCsvUploadModalOpen(false);
+      setCsvFile(null);
+      setCsvPreview(null);
+
+      // Immediate refresh of all components
+      fetchStudents();
+      fetchFilterOptions();
+      fetchBatches();
+      fetchDashboardStats();
+      fetchImportHistory();
+      fetchActivityLogs();
+    } catch (err: any) {
+      console.error("CSV Confirm error:", err);
+      setCsvError(err.message || "Failed to save CSV student records");
+    } finally {
+      setCsvConfirming(false);
     }
   };
 
@@ -484,10 +691,7 @@ export default function AdminPanel({
       // Clear scheduled step timers
       timers.forEach(t => clearTimeout(t));
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "An error occurred while uploading and analyzing the PDF.");
-      }
+      const data = await parseJsonResponse(res);
 
       setUploadPreview(data);
       // Determine default active tab in preview
@@ -525,10 +729,7 @@ export default function AdminPanel({
         })
       });
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to finalize import transaction");
-      }
+      const data = await parseJsonResponse(res);
 
       setCommitResult(data.message);
       setUploadPreview(null);
@@ -571,10 +772,7 @@ export default function AdminPanel({
         body: JSON.stringify(settingsForm)
       });
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to save settings");
-      }
+      await parseJsonResponse(res);
 
       setSettingsMessage("Settings successfully saved!");
       setCollegeName(settingsForm.collegeName);
@@ -602,10 +800,7 @@ export default function AdminPanel({
         body: JSON.stringify(passwordForm)
       });
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to change admin password");
-      }
+      await parseJsonResponse(res);
 
       setPasswordSuccess("Admin password successfully updated!");
       setPasswordForm({ currentPassword: "", newPassword: "" });
@@ -1159,14 +1354,108 @@ export default function AdminPanel({
                     <p className="text-xs text-neutral-400">View and update academic files, manually insert or edit student records.</p>
                   </div>
 
-                  <button
-                    onClick={() => handleOpenStudentModal("add")}
-                    className="inline-flex items-center gap-1 bg-blue-600 text-white text-xs font-bold px-4 py-2.5 rounded-lg shadow hover:bg-blue-700 transition-colors self-start md:self-auto"
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>Add Student Profile</span>
-                  </button>
+                  <div className="flex items-center gap-2.5 self-start md:self-auto flex-wrap">
+                    {/* Export / Download CSV Dropdown Button */}
+                    <div className="relative" ref={exportMenuRef}>
+                      <button
+                        onClick={() => setExportMenuOpen(!exportMenuOpen)}
+                        disabled={exportingCSV}
+                        className="inline-flex items-center gap-2 bg-white border border-neutral-300 hover:bg-neutral-50 text-neutral-700 hover:text-neutral-900 text-xs font-bold px-3.5 py-2.5 rounded-lg shadow-sm transition-all cursor-pointer disabled:opacity-60"
+                        title="Download student data into CSV format for administrative backups"
+                        id="btn-download-students-csv"
+                      >
+                        {exportingCSV ? (
+                          <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+                        ) : (
+                          <Download className="w-4 h-4 text-neutral-600" />
+                        )}
+                        <span>{exportingCSV ? "Exporting..." : "Download CSV"}</span>
+                        <ChevronDown className="w-3.5 h-3.5 text-neutral-400" />
+                      </button>
+
+                      {exportMenuOpen && (
+                        <div className="absolute right-0 mt-1.5 w-72 bg-white border border-neutral-200 rounded-xl shadow-xl z-30 p-2 text-left">
+                          <div className="px-3 py-2 border-b border-neutral-100">
+                            <span className="text-[10px] font-black uppercase text-neutral-400 tracking-wider">CSV Export & Backup</span>
+                          </div>
+                          
+                          <button
+                            onClick={() => handleDownloadStudentsCSV("filtered")}
+                            className="w-full flex items-start gap-2.5 px-3 py-2.5 text-xs text-neutral-700 hover:bg-neutral-50 hover:text-blue-600 rounded-lg transition-colors cursor-pointer text-left"
+                          >
+                            <FileSpreadsheet className="w-4 h-4 text-blue-600 mt-0.5 shrink-0" />
+                            <div>
+                              <p className="font-bold">Current Filtered View</p>
+                              <p className="text-[10px] text-neutral-400">
+                                {studentsTotal > 0 ? `${studentsTotal} records matching current filters` : "Matches active search and filters"}
+                              </p>
+                            </div>
+                          </button>
+
+                          <button
+                            onClick={() => handleDownloadStudentsCSV("all")}
+                            className="w-full flex items-start gap-2.5 px-3 py-2.5 text-xs text-neutral-700 hover:bg-neutral-50 hover:text-emerald-700 rounded-lg transition-colors cursor-pointer text-left"
+                          >
+                            <Download className="w-4 h-4 text-emerald-600 mt-0.5 shrink-0" />
+                            <div>
+                              <p className="font-bold">Full Database Backup</p>
+                              <p className="text-[10px] text-neutral-400">Complete backup of all student records in database</p>
+                            </div>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        setCsvUploadModalOpen(true);
+                        setCsvFile(null);
+                        setCsvPreview(null);
+                        setCsvError(null);
+                      }}
+                      className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3.5 py-2.5 rounded-lg shadow-sm transition-all cursor-pointer"
+                      title="Upload and bulk import student records via CSV"
+                      id="btn-upload-students-csv"
+                    >
+                      <Upload className="w-4 h-4" />
+                      <span>Upload CSV</span>
+                    </button>
+
+                    <button
+                      onClick={() => handleOpenStudentModal("add")}
+                      className="inline-flex items-center gap-1.5 bg-blue-600 text-white text-xs font-bold px-4 py-2.5 rounded-lg shadow hover:bg-blue-700 transition-colors cursor-pointer"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Add Student Profile</span>
+                    </button>
+                  </div>
                 </div>
+
+                {/* CSV Export Feedback Banner */}
+                {exportFeedback && (
+                  <div
+                    className={`p-3 rounded-xl border flex items-center justify-between text-xs font-semibold ${
+                      exportFeedback.type === "success"
+                        ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                        : "bg-red-50 border-red-200 text-red-800"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      {exportFeedback.type === "success" ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                      )}
+                      <span>{exportFeedback.message}</span>
+                    </div>
+                    <button
+                      onClick={() => setExportFeedback(null)}
+                      className="text-neutral-400 hover:text-neutral-700 p-1 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
 
                 {/* Advanced Filter Panel */}
                 <div className="bg-neutral-50/50 p-4 rounded-xl border border-neutral-200/60 space-y-3">
@@ -1524,26 +1813,40 @@ export default function AdminPanel({
                       </table>
                     </div>
 
-                    {/* Paginated Footer */}
-                    {studentsTotal > studentsLimit && (
-                      <div className="px-6 py-4 border-t border-neutral-100 bg-neutral-50/30 flex items-center justify-between text-xs font-semibold">
-                        <span className="text-neutral-500">Showing {studentsList.length} of {studentsTotal} Student Records</span>
-                        <div className="flex gap-2">
+                    {/* Table Footer with Record Count & Quick CSV Backup Link */}
+                    {studentsTotal > 0 && (
+                      <div className="px-6 py-4 border-t border-neutral-100 bg-neutral-50/30 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs font-semibold">
+                        <div className="flex items-center gap-3">
+                          <span className="text-neutral-500">Showing {studentsList.length} of {studentsTotal} Student Records</span>
+                          <span className="text-neutral-300">|</span>
                           <button
-                            onClick={() => setStudentsPage(p => Math.max(1, p - 1))}
-                            disabled={studentsPage === 1}
-                            className="px-3 py-2 border rounded-lg hover:bg-white disabled:opacity-50"
+                            onClick={() => handleDownloadStudentsCSV("filtered")}
+                            disabled={exportingCSV}
+                            className="inline-flex items-center gap-1.5 text-blue-600 hover:text-blue-800 text-[11px] font-bold cursor-pointer disabled:opacity-50"
+                            title="Download currently filtered students into CSV"
                           >
-                            Previous
-                          </button>
-                          <button
-                            onClick={() => setStudentsPage(p => p + 1)}
-                            disabled={studentsPage * studentsLimit >= studentsTotal}
-                            className="px-3 py-2 border rounded-lg hover:bg-white disabled:opacity-50"
-                          >
-                            Next
+                            <Download className="w-3.5 h-3.5" />
+                            <span>Download Current View CSV</span>
                           </button>
                         </div>
+                        {studentsTotal > studentsLimit && (
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => setStudentsPage(p => Math.max(1, p - 1))}
+                              disabled={studentsPage === 1}
+                              className="px-3 py-1.5 border border-neutral-200 rounded-lg bg-white hover:bg-neutral-50 disabled:opacity-50 cursor-pointer text-neutral-700"
+                            >
+                              Previous
+                            </button>
+                            <button
+                              onClick={() => setStudentsPage(p => p + 1)}
+                              disabled={studentsPage * studentsLimit >= studentsTotal}
+                              className="px-3 py-1.5 border border-neutral-200 rounded-lg bg-white hover:bg-neutral-50 disabled:opacity-50 cursor-pointer text-neutral-700"
+                            >
+                              Next
+                            </button>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1845,6 +2148,394 @@ export default function AdminPanel({
                       </div>
 
                     </form>
+                  </div>
+                </div>
+              )}
+
+              {/* CSV UPLOAD & IMPORT MODAL (STUDENT SECTION) */}
+              {csvUploadModalOpen && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-fade-in" id="modal-csv-upload-students">
+                  <div className="bg-white rounded-2xl max-w-3xl w-full max-h-[92vh] overflow-hidden shadow-2xl border border-neutral-200 flex flex-col text-left">
+                    
+                    {/* Modal Header */}
+                    <div className="px-6 py-4 border-b border-neutral-100 flex justify-between items-center bg-neutral-50/80">
+                      <div className="flex items-center gap-3">
+                        <div className="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold">
+                          <FileSpreadsheet className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h3 className="font-bold text-neutral-900 text-base leading-tight">
+                            Upload Student Details via CSV
+                          </h3>
+                          <p className="text-xs text-neutral-500 mt-0.5">
+                            Batch upload, ingest, and synchronize student academic records into PostgreSQL.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setCsvUploadModalOpen(false);
+                          setCsvPreview(null);
+                          setCsvFile(null);
+                          setCsvError(null);
+                        }}
+                        className="p-1.5 text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 rounded-lg transition-colors cursor-pointer"
+                        aria-label="Close CSV upload modal"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    {/* Modal Body */}
+                    <div className="p-6 overflow-y-auto space-y-5 flex-1">
+                      
+                      {/* Error Banner */}
+                      {csvError && (
+                        <div className="bg-red-50 border border-red-200 text-red-800 p-3.5 rounded-xl flex items-start gap-2.5 text-xs font-semibold">
+                          <AlertCircle className="w-4 h-4 text-red-600 mt-0.5 shrink-0" />
+                          <div className="flex-1">{csvError}</div>
+                        </div>
+                      )}
+
+                      {/* STEP 1: FILE SELECTION & UPLOAD */}
+                      {!csvPreview ? (
+                        <div className="space-y-5">
+                          {/* Template Download Prompt */}
+                          <div className="bg-blue-50/70 border border-blue-200/80 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                            <div className="flex items-start gap-3">
+                              <FileText className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
+                              <div>
+                                <span className="font-bold text-blue-900 block">Need a starting template?</span>
+                                <span className="text-blue-700 text-[11px]">
+                                  Download the standard CSV template with required column headers and sample data rows.
+                                </span>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={handleDownloadCsvTemplate}
+                              className="inline-flex items-center justify-center gap-1.5 bg-white border border-blue-300 hover:bg-blue-50 text-blue-700 font-bold px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer shrink-0 text-xs"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>Download Template</span>
+                            </button>
+                          </div>
+
+                          {/* File Dropzone */}
+                          <div className="border-2 border-dashed border-neutral-300 hover:border-emerald-500 rounded-2xl p-7 bg-neutral-50/50 hover:bg-emerald-50/20 text-center transition-all cursor-pointer relative">
+                            <input
+                              type="file"
+                              accept=".csv,text/csv"
+                              ref={csvFileInputRef}
+                              onChange={handleSelectCsvFile}
+                              className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                              id="csv-file-input"
+                            />
+                            <div className="w-12 h-12 bg-white text-emerald-600 rounded-full flex items-center justify-center mx-auto shadow-sm border border-neutral-200 mb-3">
+                              <Upload className="w-6 h-6" />
+                            </div>
+                            <h4 className="font-bold text-neutral-800 text-sm mb-1">
+                              {csvFile ? csvFile.name : "Choose or drag and drop student CSV file"}
+                            </h4>
+                            <p className="text-xs text-neutral-400">
+                              {csvFile
+                                ? `${(csvFile.size / 1024).toFixed(1)} KB — Click to choose a different CSV file`
+                                : "Supports UTF-8 CSV spreadsheets (comma or quoted formatted)"}
+                            </p>
+                          </div>
+
+                          {/* Field Mapping Guidelines */}
+                          <div className="border border-neutral-200 rounded-xl p-4 bg-white text-xs space-y-2">
+                            <span className="font-bold text-neutral-800 block text-[11px] uppercase tracking-wider text-neutral-400">
+                              Recognized CSV Headers
+                            </span>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px] text-neutral-600">
+                              <div><span className="font-semibold text-neutral-800">• Full Name</span> (Required)</div>
+                              <div><span className="font-semibold text-neutral-800">• Form Number</span> (Required)</div>
+                              <div><span className="font-semibold text-neutral-800">• Registration ID</span> (Required)</div>
+                              <div><span className="font-semibold text-neutral-800">• Roll Number</span></div>
+                              <div><span className="font-semibold text-neutral-800">• Enrollment Number</span></div>
+                              <div><span className="font-semibold text-neutral-800">• Semester</span></div>
+                              <div><span className="font-semibold text-neutral-800">• Batch</span></div>
+                              <div><span className="font-semibold text-neutral-800">• Programme</span></div>
+                              <div><span className="font-semibold text-neutral-800">• Major & Minor</span></div>
+                              <div><span className="font-semibold text-neutral-800">• Gender & Category</span></div>
+                              <div><span className="font-semibold text-neutral-800">• Email & Mobile</span></div>
+                              <div><span className="font-semibold text-neutral-800">• Status</span> (Active/Inactive)</div>
+                            </div>
+                            <p className="text-[10px] text-neutral-400 pt-1 border-t border-neutral-100">
+                              * Existing records matching by Registration ID or Form Number will be automatically updated with new details. Identical records are safely skipped.
+                            </p>
+                          </div>
+                        </div>
+                      ) : (
+                        /* STEP 2: PARSED PREVIEW & VALIDATION */
+                        <div className="space-y-4">
+                          {/* Metrics summary cards */}
+                          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-center text-xs">
+                            <div className="bg-neutral-100/70 border border-neutral-200 p-2.5 rounded-xl">
+                              <span className="text-[10px] font-bold text-neutral-500 uppercase block">Total Rows</span>
+                              <span className="text-base font-extrabold text-neutral-800">{csvPreview.totalRecords}</span>
+                            </div>
+                            <div className="bg-emerald-50 border border-emerald-200 p-2.5 rounded-xl">
+                              <span className="text-[10px] font-bold text-emerald-700 uppercase block">New Students</span>
+                              <span className="text-base font-extrabold text-emerald-800">{csvPreview.newCount}</span>
+                            </div>
+                            <div className="bg-amber-50 border border-amber-200 p-2.5 rounded-xl">
+                              <span className="text-[10px] font-bold text-amber-700 uppercase block">To Update</span>
+                              <span className="text-base font-extrabold text-amber-800">{csvPreview.updatedCount}</span>
+                            </div>
+                            <div className="bg-neutral-50 border border-neutral-200 p-2.5 rounded-xl">
+                              <span className="text-[10px] font-bold text-neutral-500 uppercase block">Unchanged</span>
+                              <span className="text-base font-extrabold text-neutral-700">{csvPreview.duplicateCount}</span>
+                            </div>
+                            <div className="bg-red-50 border border-red-200 p-2.5 rounded-xl">
+                              <span className="text-[10px] font-bold text-red-600 uppercase block">Invalid</span>
+                              <span className="text-base font-extrabold text-red-700">{csvPreview.invalidCount}</span>
+                            </div>
+                          </div>
+
+                          {/* Filter Tabs */}
+                          <div className="flex items-center gap-1.5 border-b border-neutral-200 pb-1.5 overflow-x-auto text-xs font-semibold">
+                            <button
+                              type="button"
+                              onClick={() => setCsvPreviewTab("all")}
+                              className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+                                csvPreviewTab === "all" ? "bg-neutral-800 text-white" : "text-neutral-600 hover:bg-neutral-100"
+                              }`}
+                            >
+                              All ({csvPreview.totalRecords})
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setCsvPreviewTab("new")}
+                              className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+                                csvPreviewTab === "new" ? "bg-emerald-700 text-white" : "text-emerald-700 hover:bg-emerald-50"
+                              }`}
+                            >
+                              New ({csvPreview.newCount})
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setCsvPreviewTab("updated")}
+                              className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+                                csvPreviewTab === "updated" ? "bg-amber-700 text-white" : "text-amber-700 hover:bg-amber-50"
+                              }`}
+                            >
+                              Updates ({csvPreview.updatedCount})
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setCsvPreviewTab("duplicate")}
+                              className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+                                csvPreviewTab === "duplicate" ? "bg-neutral-600 text-white" : "text-neutral-600 hover:bg-neutral-100"
+                              }`}
+                            >
+                              Duplicates ({csvPreview.duplicateCount})
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setCsvPreviewTab("invalid")}
+                              className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+                                csvPreviewTab === "invalid" ? "bg-red-700 text-white" : "text-red-700 hover:bg-red-50"
+                              }`}
+                            >
+                              Invalid ({csvPreview.invalidCount})
+                            </button>
+                          </div>
+
+                          {/* Preview Table */}
+                          <div className="border border-neutral-200 rounded-xl overflow-hidden max-h-72 overflow-y-auto text-xs">
+                            <table className="w-full text-left border-collapse">
+                              <thead className="bg-neutral-100 text-[10px] uppercase font-bold text-neutral-500 sticky top-0 border-b border-neutral-200">
+                                <tr>
+                                  <th className="p-2.5">Row</th>
+                                  <th className="p-2.5">Status</th>
+                                  <th className="p-2.5">Student Name</th>
+                                  <th className="p-2.5">Reg ID / Form No</th>
+                                  <th className="p-2.5">Roll No</th>
+                                  <th className="p-2.5">Semester & Batch</th>
+                                  <th className="p-2.5">Details</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-neutral-100">
+                                {(() => {
+                                  let list: any[] = [];
+                                  if (csvPreviewTab === "new") list = csvPreview.preview.newRecords.map(r => ({ ...r, _type: "new" }));
+                                  else if (csvPreviewTab === "updated") list = csvPreview.preview.updatedRecords.map(r => ({ ...r, _type: "updated" }));
+                                  else if (csvPreviewTab === "duplicate") list = csvPreview.preview.duplicateRecords.map(r => ({ ...r, _type: "duplicate" }));
+                                  else if (csvPreviewTab === "invalid") list = csvPreview.preview.invalidRecords.map(r => ({ ...r, _type: "invalid" }));
+                                  else {
+                                    list = [
+                                      ...csvPreview.preview.newRecords.map(r => ({ ...r, _type: "new" })),
+                                      ...csvPreview.preview.updatedRecords.map(r => ({ ...r, _type: "updated" })),
+                                      ...csvPreview.preview.duplicateRecords.map(r => ({ ...r, _type: "duplicate" })),
+                                      ...csvPreview.preview.invalidRecords.map(r => ({ ...r, _type: "invalid" })),
+                                    ];
+                                  }
+
+                                  if (list.length === 0) {
+                                    return (
+                                      <tr>
+                                        <td colSpan={7} className="p-6 text-center text-neutral-400 italic">
+                                          No records in this tab category.
+                                        </td>
+                                      </tr>
+                                    );
+                                  }
+
+                                  return list.map((item, idx) => (
+                                    <tr key={idx} className="hover:bg-neutral-50">
+                                      <td className="p-2.5 font-mono text-[11px] text-neutral-400">{item.rowIndex || idx + 1}</td>
+                                      <td className="p-2.5">
+                                        {item._type === "new" && (
+                                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 text-emerald-800">
+                                            NEW
+                                          </span>
+                                        )}
+                                        {item._type === "updated" && (
+                                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-800">
+                                            UPDATE
+                                          </span>
+                                        )}
+                                        {item._type === "duplicate" && (
+                                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-neutral-200 text-neutral-600">
+                                            DUPLICATE
+                                          </span>
+                                        )}
+                                        {item._type === "invalid" && (
+                                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-100 text-red-700">
+                                            INVALID
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td className="p-2.5 font-bold text-neutral-800">{item.name || "(Missing Name)"}</td>
+                                      <td className="p-2.5 font-mono text-[11px] text-neutral-600">
+                                        <div>{item.registrationId || "—"}</div>
+                                        <div className="text-[10px] text-neutral-400">{item.formNumber || "—"}</div>
+                                      </td>
+                                      <td className="p-2.5 font-medium">{item.rollNumber || "—"}</td>
+                                      <td className="p-2.5 text-neutral-600">
+                                        <div>{item.semester || "—"}</div>
+                                        <div className="text-[10px] text-neutral-400">{item.batch || "—"}</div>
+                                      </td>
+                                      <td className="p-2.5 text-[11px]">
+                                        {item._type === "updated" && item.changes && (
+                                          <div className="text-amber-800 space-y-0.5">
+                                            {item.changes.map((c: any, ci: number) => (
+                                              <span key={ci} className="block text-[10px]">
+                                                <strong>{c.field}:</strong> {c.to}
+                                              </span>
+                                            ))}
+                                          </div>
+                                        )}
+                                        {item._type === "invalid" && (
+                                          <span className="text-red-600 font-semibold">{item.errorReason}</span>
+                                        )}
+                                        {item._type === "duplicate" && (
+                                          <span className="text-neutral-400 italic">Identical with database</span>
+                                        )}
+                                        {item._type === "new" && (
+                                          <span className="text-emerald-700">Ready to insert</span>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  ));
+                                })()}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Modal Footer Actions */}
+                    <div className="px-6 py-4 bg-neutral-50/80 border-t border-neutral-100 flex items-center justify-between gap-3">
+                      {!csvPreview ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCsvUploadModalOpen(false);
+                              setCsvFile(null);
+                              setCsvError(null);
+                            }}
+                            className="px-4 py-2 bg-white border border-neutral-300 text-neutral-700 rounded-lg text-xs font-semibold hover:bg-neutral-50 cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!csvFile || csvAnalyzing}
+                            onClick={handleAnalyzeCsv}
+                            className="inline-flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow transition-colors cursor-pointer disabled:opacity-50"
+                            id="btn-analyze-csv"
+                          >
+                            {csvAnalyzing ? (
+                              <>
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                                <span>Analyzing CSV...</span>
+                              </>
+                            ) : (
+                              <>
+                                <FileSpreadsheet className="w-4 h-4" />
+                                <span>Analyze & Preview Records</span>
+                              </>
+                            )}
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            disabled={csvConfirming}
+                            onClick={() => {
+                              setCsvPreview(null);
+                              setCsvError(null);
+                            }}
+                            className="px-4 py-2 bg-white border border-neutral-300 text-neutral-700 rounded-lg text-xs font-semibold hover:bg-neutral-50 cursor-pointer disabled:opacity-50"
+                          >
+                            Choose Different File
+                          </button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              disabled={csvConfirming}
+                              onClick={() => {
+                                setCsvUploadModalOpen(false);
+                                setCsvPreview(null);
+                                setCsvFile(null);
+                              }}
+                              className="px-4 py-2 bg-white border border-neutral-300 text-neutral-700 rounded-lg text-xs font-semibold hover:bg-neutral-50 cursor-pointer disabled:opacity-50"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              disabled={csvConfirming || (csvPreview.newCount === 0 && csvPreview.updatedCount === 0)}
+                              onClick={handleConfirmCsvImport}
+                              className="inline-flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow transition-colors cursor-pointer disabled:opacity-50"
+                              id="btn-confirm-import-csv"
+                            >
+                              {csvConfirming ? (
+                                <>
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                  <span>Importing Students...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Check className="w-4 h-4" />
+                                  <span>
+                                    Confirm & Import {csvPreview.newCount + csvPreview.updatedCount} Students
+                                  </span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+
                   </div>
                 </div>
               )}
@@ -2528,10 +3219,7 @@ export default function AdminPanel({
                           },
                           body: JSON.stringify({ name: newBatchName.trim() })
                         });
-                        const data = await res.json();
-                        if (!res.ok) {
-                          throw new Error(data.error || "Failed to add batch");
-                        }
+                        await parseJsonResponse(res);
                         setNewBatchName("");
                         fetchBatches();
                       } catch (err: any) {
@@ -2585,14 +3273,11 @@ export default function AdminPanel({
                                     method: "DELETE",
                                     headers: { Authorization: `Bearer ${token}` }
                                   });
-                                  if (res.ok) {
-                                    fetchBatches();
-                                  } else {
-                                    const errData = await res.json();
-                                    alert(errData.error || "Failed to delete batch");
-                                  }
-                                } catch (err) {
+                                  await parseJsonResponse(res);
+                                  fetchBatches();
+                                } catch (err: any) {
                                   console.error("Delete batch error:", err);
+                                  alert(err.message || "Failed to delete batch");
                                 }
                               }}
                               className="text-[10px] text-red-600 font-bold hover:underline"

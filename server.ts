@@ -4,7 +4,6 @@ import multer from "multer";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { eq, like, or, and, sql, desc, asc, ilike, gt, gte, lt, lte } from "drizzle-orm";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import nodemailer from "nodemailer";
 import * as pdf from "pdf-parse";
@@ -15,6 +14,20 @@ import { students, imports, activityLogs, settings, batches, searchQueries, sear
 const app = express();
 const PORT = 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "pragjyotish_bca_secret_key_123";
+
+// URL normalization for Vercel Serverless Function compatibility
+app.use((req, res, next) => {
+  if (req.url) {
+    if (req.url.startsWith("/api/index")) {
+      req.url = req.url.replace(/^\/api\/index/, "/api");
+    } else if (req.originalUrl && req.originalUrl.startsWith("/api") && !req.url.startsWith("/api")) {
+      req.url = req.originalUrl;
+    } else if (!req.url.startsWith("/api") && req.originalUrl?.includes("/api/")) {
+      req.url = req.originalUrl;
+    }
+  }
+  next();
+});
 
 // Configure body-parser
 app.use(express.json({ limit: "50mb" }));
@@ -114,10 +127,16 @@ interface AuthRequest extends express.Request {
 // JWT Authentication Middleware
 const requireJWT = (req: AuthRequest, res: express.Response, next: express.NextFunction) => {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+  let token: string | null = null;
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    token = authHeader.split(" ")[1];
+  } else if (typeof req.query.token === "string" && req.query.token.length > 0) {
+    token = req.query.token;
+  }
+
+  if (!token) {
     return res.status(401).json({ error: "Unauthorized: Missing authentication token" });
   }
-  const token = authHeader.split(" ")[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as { email: string; role: string };
     req.admin = decoded;
@@ -1556,11 +1575,677 @@ app.get("/api/admin/students", requireJWT, async (req, res) => {
   }
 });
 
-// GET single student details (including private fields)
-app.get("/api/admin/students/:id", requireJWT, async (req, res) => {
-  const { id } = req.params;
+// GET /api/admin/students/export - Export student records as CSV for administrative backups
+app.get("/api/admin/students/export", requireJWT as any, async (req: AuthRequest, res) => {
   try {
-    const record = await db.select().from(students).where(eq(students.id, parseInt(id, 10)));
+    const scope = typeof req.query.scope === "string" ? req.query.scope : "filtered";
+    const searchVal = typeof req.query.search === "string" ? req.query.search.trim() : "";
+    const programmeFilter = typeof req.query.programme === "string" ? req.query.programme.trim() : "";
+    const genderFilter = typeof req.query.gender === "string" ? req.query.gender.trim() : "";
+    const categoryFilter = typeof req.query.category === "string" ? req.query.category.trim() : "";
+    const majorFilter = typeof req.query.major === "string" ? req.query.major.trim() : "";
+    const minorFilter = typeof req.query.minor === "string" ? req.query.minor.trim() : "";
+    const admissionCategoryFilter = typeof req.query.admissionCategory === "string" ? req.query.admissionCategory.trim() : "";
+    const statusFilter = typeof req.query.status === "string" ? req.query.status.trim() : "";
+    const semesterFilter = typeof req.query.semester === "string" ? req.query.semester.trim() : "";
+    const batchFilter = typeof req.query.batch === "string" ? req.query.batch.trim() : "";
+
+    let itemsQuery = db.select().from(students);
+    let conditions = [];
+
+    // If scope !== "all", apply active filter conditions
+    if (scope !== "all") {
+      if (searchVal) {
+        conditions.push(
+          or(
+            ilike(students.name, `%${searchVal}%`),
+            ilike(students.registrationId, `%${searchVal}%`),
+            ilike(students.formNumber, `%${searchVal}%`),
+            ilike(students.rollNumber, `%${searchVal}%`),
+            ilike(students.enrollmentNumber, `%${searchVal}%`),
+            ilike(students.email, `%${searchVal}%`),
+            ilike(students.mobile, `%${searchVal}%`)
+          )
+        );
+      }
+      if (programmeFilter) {
+        conditions.push(eq(students.programmeName, programmeFilter));
+      }
+      if (genderFilter) {
+        conditions.push(ilike(students.gender, genderFilter));
+      }
+      if (categoryFilter) {
+        conditions.push(eq(students.category, categoryFilter));
+      }
+      if (majorFilter) {
+        conditions.push(eq(students.majorSubject, majorFilter));
+      }
+      if (minorFilter) {
+        conditions.push(eq(students.minorSubject, minorFilter));
+      }
+      if (admissionCategoryFilter) {
+        conditions.push(eq(students.admissionCategory, admissionCategoryFilter));
+      }
+      if (statusFilter) {
+        conditions.push(eq(students.status, statusFilter));
+      }
+      if (semesterFilter) {
+        conditions.push(eq(students.semester, semesterFilter));
+      }
+      if (batchFilter) {
+        conditions.push(eq(students.batch, batchFilter));
+      }
+    }
+
+    if (conditions.length > 0) {
+      itemsQuery = itemsQuery.where(and(...conditions)) as any;
+    }
+
+    const records = await itemsQuery.orderBy(asc(students.id));
+
+    // Log the backup activity
+    const adminEmail = req.admin?.email || "admin";
+    await logActivity(
+      adminEmail,
+      "EXPORT_STUDENTS_CSV",
+      `Exported ${records.length} student records (${scope === "all" ? "Full database backup" : "Filtered records"}) to CSV`
+    );
+
+    // CSV Headers
+    const headers = [
+      "ID",
+      "Form Number",
+      "Registration ID",
+      "Roll Number",
+      "Enrollment Number",
+      "Student Name",
+      "Gender",
+      "Social Category",
+      "Admission Category",
+      "Programme",
+      "Major Subject",
+      "Minor Subject",
+      "Semester",
+      "Batch",
+      "Email",
+      "Mobile",
+      "Transaction Mode",
+      "Status",
+      "Profile Views",
+      "Created At",
+      "Updated At"
+    ];
+
+    const escapeCsv = (val: any) => {
+      if (val === null || val === undefined) return '""';
+      const str = String(val);
+      return `"${str.replace(/"/g, '""')}"`;
+    };
+
+    let csvContent = "\uFEFF"; // UTF-8 BOM for MS Excel compatibility
+    csvContent += headers.map(h => `"${h}"`).join(",") + "\r\n";
+
+    for (const s of records) {
+      const row = [
+        s.id,
+        s.formNumber || "",
+        s.registrationId || "",
+        s.rollNumber || "",
+        s.enrollmentNumber || "",
+        s.name || "",
+        s.gender || "",
+        s.category || "",
+        s.admissionCategory || "",
+        s.programmeName || "",
+        s.majorSubject || "",
+        s.minorSubject || "",
+        s.semester || "",
+        s.batch || "",
+        s.email || "",
+        s.mobile || "",
+        s.transactionMode || "",
+        s.status || "Active",
+        s.viewCount ?? 0,
+        s.createdAt ? new Date(s.createdAt).toISOString() : "",
+        s.updatedAt ? new Date(s.updatedAt).toISOString() : ""
+      ];
+      csvContent += row.map(escapeCsv).join(",") + "\r\n";
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const filename = `students_${scope === "all" ? "full_backup" : "export"}_${timestamp}.csv`;
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.status(200).send(csvContent);
+  } catch (err: any) {
+    console.error("Export students CSV error:", err);
+    res.status(500).json({ error: "Failed to generate student records CSV backup" });
+  }
+});
+
+// ---------------------------------------------------------
+// 2.8. STUDENT CSV UPLOAD & IMPORT WORKFLOW
+// ---------------------------------------------------------
+
+// Helper: RFC 4180 compliant CSV Parser
+function parseCsvContent(text: string): { headers: string[]; rows: string[][] } {
+  if (text.charCodeAt(0) === 0xFEFF) {
+    text = text.slice(1);
+  }
+  const lines: string[][] = [];
+  let currentRow: string[] = [];
+  let currentField = "";
+  let insideQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const nextChar = text[i + 1];
+
+    if (insideQuotes) {
+      if (char === '"' && nextChar === '"') {
+        currentField += '"';
+        i++;
+      } else if (char === '"') {
+        insideQuotes = false;
+      } else {
+        currentField += char;
+      }
+    } else {
+      if (char === '"') {
+        insideQuotes = true;
+      } else if (char === ',') {
+        currentRow.push(currentField.trim());
+        currentField = "";
+      } else if (char === '\r') {
+        if (nextChar === '\n') i++;
+        currentRow.push(currentField.trim());
+        currentField = "";
+        if (currentRow.some((col) => col.length > 0)) {
+          lines.push(currentRow);
+        }
+        currentRow = [];
+      } else if (char === '\n') {
+        currentRow.push(currentField.trim());
+        currentField = "";
+        if (currentRow.some((col) => col.length > 0)) {
+          lines.push(currentRow);
+        }
+        currentRow = [];
+      } else {
+        currentField += char;
+      }
+    }
+  }
+
+  if (currentField.length > 0 || currentRow.length > 0) {
+    currentRow.push(currentField.trim());
+    if (currentRow.some((col) => col.length > 0)) {
+      lines.push(currentRow);
+    }
+  }
+
+  if (lines.length === 0) {
+    return { headers: [], rows: [] };
+  }
+
+  const headers = lines[0].map((h) => h.trim());
+  const rows = lines.slice(1);
+  return { headers, rows };
+}
+
+// Helper: Map CSV row headers into student object
+function mapCsvRowToStudentRecord(headers: string[], row: string[]): any {
+  const normKey = (str: string) => str.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const record: any = {};
+
+  headers.forEach((header, idx) => {
+    const key = normKey(header);
+    const val = (row[idx] || "").trim();
+
+    if (key === "formnumber" || key === "formno" || key === "form" || key === "formnum") {
+      record.formNumber = val;
+    } else if (key === "registrationid" || key === "regid" || key === "regno" || key === "registrationno" || key === "registration") {
+      record.registrationId = val;
+    } else if (key === "rollnumber" || key === "rollno" || key === "roll") {
+      record.rollNumber = val;
+    } else if (key === "enrollmentnumber" || key === "enrollmentno" || key === "enrollno" || key === "enrollment") {
+      record.enrollmentNumber = val;
+    } else if (key === "name" || key === "fullname" || key === "studentname" || key === "candidatename") {
+      record.name = val;
+    } else if (key === "gender" || key === "sex") {
+      record.gender = val;
+    } else if (key === "category" || key === "caste") {
+      record.category = val;
+    } else if (key === "admissioncategory" || key === "admcategory") {
+      record.admissionCategory = val;
+    } else if (key === "programmename" || key === "programme" || key === "course" || key === "program") {
+      record.programmeName = val;
+    } else if (key === "majorsubject" || key === "major" || key === "honours") {
+      record.majorSubject = val;
+    } else if (key === "minorsubject" || key === "minor") {
+      record.minorSubject = val;
+    } else if (key === "semester" || key === "sem") {
+      record.semester = val;
+    } else if (key === "batch" || key === "session" || key === "academicyear") {
+      record.batch = val;
+    } else if (key === "email" || key === "emailaddress" || key === "emailid" || key === "emailaddress") {
+      record.email = val;
+    } else if (key === "mobile" || key === "mobilenumber" || key === "phone" || key === "phonenumber" || key === "contact") {
+      record.mobile = val;
+    } else if (key === "transactionmode" || key === "paymentmode" || key === "feemode") {
+      record.transactionMode = val;
+    } else if (key === "status") {
+      record.status = val;
+    }
+  });
+
+  // Fallbacks if one required ID is provided but not both
+  if (record.formNumber && !record.registrationId) {
+    record.registrationId = record.formNumber;
+  } else if (record.registrationId && !record.formNumber) {
+    record.formNumber = record.registrationId;
+  }
+
+  return record;
+}
+
+// GET /api/admin/students/csv-template - Download starter CSV template for student records
+app.get("/api/admin/students/csv-template", requireJWT as any, (req, res) => {
+  const headers = [
+    "Form Number",
+    "Registration ID",
+    "Roll Number",
+    "Enrollment Number",
+    "Full Name",
+    "Gender",
+    "Category",
+    "Admission Category",
+    "Programme",
+    "Major Subject",
+    "Minor Subject",
+    "Semester",
+    "Batch",
+    "Email Address",
+    "Mobile Number",
+    "Transaction Mode",
+    "Status"
+  ];
+
+  const sampleRows = [
+    [
+      "PC-BCA-2026-001",
+      "REG-2026-101",
+      "BCA-01",
+      "EN-2026-001",
+      "RAHUL SHARMA",
+      "MALE",
+      "GENERAL",
+      "GENERAL",
+      "BACHELOR OF COMPUTER APPLICATIONS(COMPUTER APPLICATION)",
+      "Computer Science",
+      "Mathematics",
+      "1st Semester",
+      "2026–2029",
+      "rahul.sharma@example.com",
+      "9876543210",
+      "ONLINE",
+      "Active"
+    ],
+    [
+      "PC-BCA-2026-002",
+      "REG-2026-102",
+      "BCA-02",
+      "EN-2026-002",
+      "PRIYA DEVI",
+      "FEMALE",
+      "OBC",
+      "GENERAL",
+      "BACHELOR OF COMPUTER APPLICATIONS(COMPUTER APPLICATION)",
+      "Computer Science",
+      "Statistics",
+      "1st Semester",
+      "2026–2029",
+      "priya.devi@example.com",
+      "9876543211",
+      "CASH",
+      "Active"
+    ]
+  ];
+
+  const escapeCsv = (val: any) => `"${String(val ?? "").replace(/"/g, '""')}"`;
+  let csv = "\uFEFF";
+  csv += headers.map(escapeCsv).join(",") + "\r\n";
+  for (const row of sampleRows) {
+    csv += row.map(escapeCsv).join(",") + "\r\n";
+  }
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="student_import_template.csv"');
+  res.status(200).send(csv);
+});
+
+// POST /api/admin/students/upload-csv-preview - Parse and validate CSV data before committing
+app.post("/api/admin/students/upload-csv-preview", requireJWT as any, upload.single("file"), async (req: AuthRequest, res) => {
+  try {
+    let csvText = "";
+    let fileName = "students.csv";
+
+    if (req.file && req.file.buffer) {
+      csvText = req.file.buffer.toString("utf-8");
+      fileName = req.file.originalname || "students.csv";
+    } else if (typeof req.body.rawCsv === "string") {
+      csvText = req.body.rawCsv;
+      if (req.body.fileName) fileName = req.body.fileName;
+    }
+
+    if (!csvText || !csvText.trim()) {
+      return res.status(400).json({ error: "No CSV content or file provided. Please select a valid CSV file." });
+    }
+
+    const { headers, rows } = parseCsvContent(csvText);
+
+    if (headers.length === 0 || rows.length === 0) {
+      return res.status(400).json({ error: "The uploaded CSV file is empty or missing headers." });
+    }
+
+    // Fetch existing students for duplicate / update detection
+    const existing = await db.select({
+      id: students.id,
+      formNumber: students.formNumber,
+      registrationId: students.registrationId,
+      name: students.name,
+      rollNumber: students.rollNumber,
+      enrollmentNumber: students.enrollmentNumber,
+      semester: students.semester,
+      batch: students.batch,
+      programmeName: students.programmeName,
+      majorSubject: students.majorSubject,
+      minorSubject: students.minorSubject,
+      gender: students.gender,
+      category: students.category,
+      admissionCategory: students.admissionCategory,
+      transactionMode: students.transactionMode,
+      email: students.email,
+      mobile: students.mobile,
+      status: students.status,
+    }).from(students);
+
+    const existingByForm = new Map<string, typeof existing[0]>();
+    const existingByReg = new Map<string, typeof existing[0]>();
+    existing.forEach((s) => {
+      if (s.formNumber) existingByForm.set(s.formNumber.trim().toLowerCase(), s);
+      if (s.registrationId) existingByReg.set(s.registrationId.trim().toLowerCase(), s);
+    });
+
+    const cleanString = (val: any) => {
+      if (val === null || val === undefined) return "";
+      const s = String(val).replace(/\s+/g, " ").trim();
+      const lower = s.toLowerCase();
+      if (lower === "" || lower === "null" || lower === "undefined" || lower === "n/a" || lower === "-" || lower === "none") {
+        return "";
+      }
+      return s;
+    };
+
+    const newRecords: any[] = [];
+    const updatedRecords: any[] = [];
+    const duplicateRecords: any[] = [];
+    const invalidRecords: any[] = [];
+
+    rows.forEach((row, idx) => {
+      const rec = mapCsvRowToStudentRecord(headers, row);
+
+      // Clean fields
+      rec.name = cleanString(rec.name);
+      rec.formNumber = cleanString(rec.formNumber);
+      rec.registrationId = cleanString(rec.registrationId);
+      rec.rollNumber = cleanString(rec.rollNumber);
+      rec.enrollmentNumber = cleanString(rec.enrollmentNumber);
+      rec.semester = cleanString(rec.semester);
+      rec.batch = cleanString(rec.batch);
+      rec.programmeName = cleanString(rec.programmeName) || "BACHELOR OF COMPUTER APPLICATIONS(COMPUTER APPLICATION)";
+      rec.majorSubject = cleanString(rec.majorSubject);
+      rec.minorSubject = cleanString(rec.minorSubject);
+      rec.gender = cleanString(rec.gender) || "MALE";
+      rec.category = cleanString(rec.category) || "GENERAL";
+      rec.admissionCategory = cleanString(rec.admissionCategory) || "GENERAL";
+      rec.transactionMode = cleanString(rec.transactionMode) || "CASH";
+      rec.email = cleanString(rec.email);
+      rec.mobile = cleanString(rec.mobile);
+      rec.status = cleanString(rec.status) === "Inactive" ? "Inactive" : "Active";
+
+      // Validate mandatory fields
+      if (!rec.name || !rec.formNumber || !rec.registrationId) {
+        invalidRecords.push({
+          ...rec,
+          rowIndex: idx + 2, // 1-based, accounting for header
+          errorReason: !rec.name
+            ? "Student Name is required"
+            : "Form Number or Registration ID is missing",
+        });
+        return;
+      }
+
+      // Check existing matches
+      const formKey = rec.formNumber.toLowerCase();
+      const regKey = rec.registrationId.toLowerCase();
+      const existingMatch = existingByReg.get(regKey) || existingByForm.get(formKey);
+
+      if (existingMatch) {
+        // Compare fields to determine if there is an actual update
+        const changes: { field: string; from: string; to: string }[] = [];
+
+        if (rec.name && rec.name.toLowerCase() !== (existingMatch.name || "").toLowerCase()) {
+          changes.push({ field: "Name", from: existingMatch.name || "", to: rec.name });
+        }
+        if (rec.rollNumber && rec.rollNumber !== (existingMatch.rollNumber || "")) {
+          changes.push({ field: "Roll Number", from: existingMatch.rollNumber || "", to: rec.rollNumber });
+        }
+        if (rec.email && rec.email.toLowerCase() !== (existingMatch.email || "").toLowerCase()) {
+          changes.push({ field: "Email", from: existingMatch.email || "", to: rec.email });
+        }
+        if (rec.mobile && rec.mobile !== (existingMatch.mobile || "")) {
+          changes.push({ field: "Mobile", from: existingMatch.mobile || "", to: rec.mobile });
+        }
+        if (rec.batch && rec.batch !== (existingMatch.batch || "")) {
+          changes.push({ field: "Batch", from: existingMatch.batch || "", to: rec.batch });
+        }
+        if (rec.semester && rec.semester !== (existingMatch.semester || "")) {
+          changes.push({ field: "Semester", from: existingMatch.semester || "", to: rec.semester });
+        }
+        if (rec.majorSubject && rec.majorSubject !== (existingMatch.majorSubject || "")) {
+          changes.push({ field: "Major", from: existingMatch.majorSubject || "", to: rec.majorSubject });
+        }
+        if (rec.minorSubject && rec.minorSubject !== (existingMatch.minorSubject || "")) {
+          changes.push({ field: "Minor", from: existingMatch.minorSubject || "", to: rec.minorSubject });
+        }
+        if (rec.status && rec.status !== (existingMatch.status || "Active")) {
+          changes.push({ field: "Status", from: existingMatch.status || "Active", to: rec.status });
+        }
+
+        if (changes.length > 0) {
+          updatedRecords.push({
+            ...rec,
+            rowIndex: idx + 2,
+            existingId: existingMatch.id,
+            existingRecord: existingMatch,
+            changes,
+          });
+        } else {
+          duplicateRecords.push({
+            ...rec,
+            rowIndex: idx + 2,
+            existingId: existingMatch.id,
+          });
+        }
+      } else {
+        newRecords.push({
+          ...rec,
+          rowIndex: idx + 2,
+        });
+      }
+    });
+
+    res.json({
+      fileName,
+      totalRecords: rows.length,
+      newCount: newRecords.length,
+      updatedCount: updatedRecords.length,
+      duplicateCount: duplicateRecords.length,
+      invalidCount: invalidRecords.length,
+      preview: {
+        newRecords,
+        updatedRecords,
+        duplicateRecords,
+        invalidRecords,
+      },
+    });
+  } catch (err: any) {
+    console.error("CSV preview analysis error:", err);
+    res.status(500).json({ error: err.message || "Failed to process and analyze CSV file" });
+  }
+});
+
+// POST /api/admin/students/upload-csv-confirm - Commit validated CSV student records to PostgreSQL
+app.post("/api/admin/students/upload-csv-confirm", requireJWT as any, async (req: AuthRequest, res) => {
+  const email = req.admin?.email || "admin";
+  const { fileName, preview } = req.body;
+
+  if (!preview) {
+    return res.status(400).json({ error: "No student records preview provided" });
+  }
+
+  const newRecords: any[] = preview.newRecords || [];
+  const updatedRecords: any[] = preview.updatedRecords || [];
+  const duplicateRecordsList: any[] = preview.duplicateRecords || [];
+  const invalidCount = (preview.invalidRecords || []).length;
+  const duplicatesCount = duplicateRecordsList.length;
+
+  try {
+    let importId = 0;
+
+    await db.transaction(async (tx) => {
+      // 1. Create entry in imports table
+      const newImport = await tx.insert(imports).values({
+        fileName: fileName || "students_upload.csv",
+        adminEmail: email,
+        totalRecords: newRecords.length + updatedRecords.length + duplicatesCount + invalidCount,
+        newRecords: newRecords.length,
+        updatedRecords: updatedRecords.length,
+        duplicateRecords: duplicatesCount,
+        invalidRecords: invalidCount,
+        status: "Success",
+      }).returning();
+
+      if (newImport && newImport.length > 0) {
+        importId = newImport[0].id;
+      }
+
+      const batchesSeen = new Set<string>();
+
+      // 2. Insert new student records
+      for (const rec of newRecords) {
+        const batchName = rec.batch ? String(rec.batch).trim() : "";
+        if (batchName) batchesSeen.add(batchName);
+
+        await tx.insert(students).values({
+          formNumber: String(rec.formNumber).trim(),
+          registrationId: String(rec.registrationId).trim(),
+          rollNumber: rec.rollNumber ? String(rec.rollNumber).trim() : "",
+          enrollmentNumber: rec.enrollmentNumber ? String(rec.enrollmentNumber).trim() : "",
+          semester: rec.semester ? String(rec.semester).trim() : "",
+          batch: batchName,
+          programmeName: rec.programmeName || "BACHELOR OF COMPUTER APPLICATIONS(COMPUTER APPLICATION)",
+          transactionMode: rec.transactionMode || "CASH",
+          admissionCategory: rec.admissionCategory || "GENERAL",
+          majorSubject: rec.majorSubject || "",
+          minorSubject: rec.minorSubject || "",
+          name: String(rec.name).trim(),
+          gender: rec.gender ? String(rec.gender).trim().toUpperCase() : "MALE",
+          category: rec.category ? String(rec.category).trim().toUpperCase() : "GENERAL",
+          email: rec.email ? String(rec.email).trim() : "",
+          mobile: rec.mobile ? String(rec.mobile).trim() : "",
+          status: rec.status === "Inactive" ? "Inactive" : "Active",
+          importId: importId || null,
+        });
+      }
+
+      // 3. Update existing student records
+      for (const rec of updatedRecords) {
+        const batchName = rec.batch ? String(rec.batch).trim() : "";
+        if (batchName) batchesSeen.add(batchName);
+
+        await tx.update(students)
+          .set({
+            name: String(rec.name).trim(),
+            formNumber: String(rec.formNumber).trim(),
+            registrationId: String(rec.registrationId).trim(),
+            email: rec.email ? String(rec.email).trim() : "",
+            mobile: rec.mobile ? String(rec.mobile).trim() : "",
+            rollNumber: rec.rollNumber ? String(rec.rollNumber).trim() : "",
+            enrollmentNumber: rec.enrollmentNumber ? String(rec.enrollmentNumber).trim() : "",
+            semester: rec.semester ? String(rec.semester).trim() : "",
+            batch: batchName,
+            programmeName: rec.programmeName || "BACHELOR OF COMPUTER APPLICATIONS(COMPUTER APPLICATION)",
+            transactionMode: rec.transactionMode || "CASH",
+            admissionCategory: rec.admissionCategory || "GENERAL",
+            majorSubject: rec.majorSubject || "",
+            minorSubject: rec.minorSubject || "",
+            gender: rec.gender ? String(rec.gender).trim().toUpperCase() : "MALE",
+            category: rec.category ? String(rec.category).trim().toUpperCase() : "GENERAL",
+            status: rec.status === "Inactive" ? "Inactive" : "Active",
+            updatedAt: new Date(),
+            importId: importId || null,
+          })
+          .where(eq(students.id, rec.existingId));
+      }
+
+      // 4. Auto-register any new batches in the batches table
+      for (const b of batchesSeen) {
+        try {
+          const existingBatch = await tx.select().from(batches).where(eq(batches.name, b)).limit(1);
+          if (existingBatch.length === 0) {
+            await tx.insert(batches).values({ name: b });
+          }
+        } catch {
+          // Ignore unique collision
+        }
+      }
+
+      // 5. Activity log
+      await tx.insert(activityLogs).values({
+        adminEmail: email,
+        action: "CSV Import",
+        details: `Imported student records from "${fileName || "students.csv"}". Added: ${newRecords.length}, Updated: ${updatedRecords.length}, Duplicates skipped: ${duplicatesCount}.`,
+      });
+    });
+
+    res.json({
+      success: true,
+      importId,
+      totalProcessed: newRecords.length + updatedRecords.length,
+      newCount: newRecords.length,
+      updatedCount: updatedRecords.length,
+      duplicateCount: duplicatesCount,
+      invalidCount,
+      message: `Successfully processed ${newRecords.length + updatedRecords.length} student records from CSV.`,
+    });
+  } catch (err: any) {
+    console.error("CSV import confirm error:", err);
+    res.status(500).json({ error: err.message || "Failed to commit CSV records to database" });
+  }
+});
+
+// GET single student details (including private fields)
+app.get("/api/admin/students/:id", requireJWT as any, async (req: AuthRequest, res: express.Response, next: express.NextFunction) => {
+  const { id } = req.params;
+  const numId = parseInt(id, 10);
+  if (isNaN(numId)) {
+    return next();
+  }
+  try {
+    const record = await db.select().from(students).where(eq(students.id, numId));
     if (record.length === 0) {
       return res.status(404).json({ error: "Student record not found" });
     }
@@ -2260,6 +2945,7 @@ app.post("/api/admin/import/confirm", requireJWT, async (req: AuthRequest, res) 
 async function startServer() {
   // In production, serve the compiled static build files. In development, mount Vite middleware.
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -2279,7 +2965,21 @@ async function startServer() {
   });
 }
 
-startServer().catch((err) => {
-  console.error("Failed to bootstrap server instance:", err);
-});
+// Only start standalone HTTP server when executed directly and not in Vercel Serverless Function environment
+const isDirectRun = Boolean(
+  process.argv[1] && (
+    process.argv[1].endsWith("server.ts") ||
+    process.argv[1].endsWith("server.cjs") ||
+    process.argv[1].endsWith("server.js")
+  )
+);
+
+if (!process.env.VERCEL && isDirectRun) {
+  startServer().catch((err) => {
+    console.error("Failed to bootstrap server instance:", err);
+  });
+}
+
+export { app };
+export default app;
 
