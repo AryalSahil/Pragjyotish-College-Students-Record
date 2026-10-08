@@ -26,19 +26,24 @@ export const createPool = () => {
         idleTimeoutMillis: 10000,
       });
     } else {
+      if (process.env.VERCEL && !process.env.SQL_HOST) {
+        console.warn("[Database Config] Vercel environment detected with no DATABASE_URL or POSTGRES_URL set. Please configure DATABASE_URL in Vercel project environment settings.");
+      }
+
       const isUnixSocket = Boolean(process.env.SQL_HOST && process.env.SQL_HOST.startsWith('/'));
       const isLocalHost = !process.env.SQL_HOST || process.env.SQL_HOST === 'localhost' || process.env.SQL_HOST === '127.0.0.1' || isUnixSocket;
       const shouldUseSsl = !isLocalHost && (process.env.SQL_SSL === 'true' || process.env.NODE_ENV === 'production');
+      const connTimeout = (process.env.VERCEL && !process.env.SQL_HOST) ? 2000 : 5000;
 
       global._postgresPool = new Pool({
-        host: process.env.SQL_HOST,
+        host: process.env.SQL_HOST || (process.env.VERCEL ? "127.0.0.1" : undefined),
         user: process.env.SQL_USER,
         password: process.env.SQL_PASSWORD,
         database: process.env.SQL_DB_NAME,
         port: process.env.SQL_PORT ? parseInt(process.env.SQL_PORT, 10) : 5432,
         ssl: shouldUseSsl ? { rejectUnauthorized: false } : undefined,
         max: process.env.VERCEL ? 3 : 10,
-        connectionTimeoutMillis: 5000,
+        connectionTimeoutMillis: connTimeout,
         idleTimeoutMillis: 10000,
       });
     }

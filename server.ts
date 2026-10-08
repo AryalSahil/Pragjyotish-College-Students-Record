@@ -6,7 +6,6 @@ import bcrypt from "bcryptjs";
 import { eq, like, or, and, sql, desc, asc, ilike, gt, gte, lt, lte } from "drizzle-orm";
 import { GoogleGenAI, Type } from "@google/genai";
 import nodemailer from "nodemailer";
-import * as pdf from "pdf-parse";
 
 import { db } from "./src/db/index.ts";
 import { students, imports, activityLogs, settings, batches, searchQueries, searchEvents, profileViewEvents } from "./src/db/schema.ts";
@@ -18,9 +17,17 @@ const JWT_SECRET = process.env.JWT_SECRET || "pragjyotish_bca_secret_key_123";
 // URL normalization for Vercel Serverless Function compatibility
 app.use((req, res, next) => {
   const matchedPath = (req.headers["x-matched-path"] as string) || (req.headers["x-invoke-path"] as string);
-  if (matchedPath && matchedPath.startsWith("/api") && (!req.url || req.url === "/api" || req.url === "/" || !req.url.startsWith("/api/"))) {
+  if (matchedPath && matchedPath.startsWith("/api")) {
     req.url = matchedPath;
+  } else if (req.headers["x-now-route-matches"]) {
+    const rawMatches = String(req.headers["x-now-route-matches"]);
+    const m = rawMatches.match(/1=([^&;]+)/);
+    if (m && m[1]) {
+      const subpath = decodeURIComponent(m[1]).replace(/^\/+/, "");
+      req.url = `/api/${subpath}`;
+    }
   }
+
   if (req.url) {
     if (req.url.startsWith("/api/index")) {
       req.url = req.url.replace(/^\/api\/index/, "/api");
@@ -2545,19 +2552,7 @@ app.post("/api/admin/import/upload", requireJWT, upload.single("pdf"), async (re
     const ai = getAiClient();
     const pdfBase64 = req.file.buffer.toString("base64");
 
-    await logActivity(email, "PDF Upload", `Uploaded student records PDF: "${req.file.originalname}". Processing with pdf-parse and Gemini...`);
-
-    // Step 1: Parse PDF text locally using pdf-parse to handle multi-page documents and dynamic headers robustly
-    let extractedText = "";
-    try {
-      console.log(`[PDF-Parse] Starting text extraction for file: ${req.file.originalname}`);
-      const pdfParser = ((pdf as any).default || pdf) as any;
-      const pdfData = await pdfParser(req.file.buffer);
-      extractedText = pdfData.text || "";
-      console.log(`[PDF-Parse] Successfully extracted ${extractedText.length} characters of raw text.`);
-    } catch (parseErr: any) {
-      console.warn("[PDF-Parse] Local text extraction failed, falling back to direct LLM parsing:", parseErr);
-    }
+    await logActivity(email, "PDF Upload", `Uploaded student records PDF: "${req.file.originalname}". Processing with Gemini multimodal document understanding...`);
 
     // Perform LLM Parsing with robust retry-on-503 & multi-model fallback cascade
     let response: any = null;
@@ -2574,54 +2569,22 @@ app.post("/api/admin/import/upload", requireJWT, upload.single("pdf"), async (re
         attempts++;
         console.log(`[Gemini PDF Ingestion] Attempt ${attempts} using model ${modelToUse}...`);
         
-        // Build contents depending on whether text was extracted
-        const contents: any[] = [];
-        if (extractedText && extractedText.trim().length > 20) {
-          contents.push({
-            text: `You are an expert data parser. Below is the raw text extracted from a Pragjyotish College BCA admission/student list PDF (which may have multiple pages and dynamic table headers).
-Please parse this text, understand its table structure, and extract all student records. Output as a JSON array of student objects. Each object MUST strictly follow this JSON schema:
-
-{
-  "formNumber": "string containing the Form Number (e.g., 2632862)",
-  "registrationId": "string containing the Registration ID (e.g., 26011453)",
-  "rollNumber": "string containing the Roll Number (e.g., 2401, 2405, etc.) if visible in the document",
-  "enrollmentNumber": "string containing the Enrollment Number (e.g., PC/2024/005, etc.) if visible in the document",
-  "semester": "string containing Semester (e.g., '1st Semester', '3rd Semester', '5th Semester'). Try to map/normalize values like '1st', 'sem 1', 'first sem' to '1st Semester', etc.",
-  "batch": "string containing the Batch/Academic Year (e.g., '2024–2027', '2025–2028', '2026–2029') if found or can be inferred",
-  "programmeName": "string containing the Programme Name (usually BACHELOR OF COMPUTER APPLICATIONS(COMPUTER APPLICATION))",
-  "transactionMode": "string containing Transaction Mode (usually CASH or ONLINE)",
-  "admissionCategory": "string containing Admission Category (usually GENERAL)",
-  "majorSubject": "string containing Major Subject",
-  "minorSubject": "string containing Minor Subject",
-  "name": "string containing Name of the Applicant",
-  "gender": "string containing Gender (MALE or FEMALE)",
-  "category": "string containing Category (e.g. GENERAL, OBC / MOBC, SCHEDULE TRIBE, SCHEDULED CASTE, EWS)",
-  "email": "string containing Email Address",
-  "mobile": "string containing Mobile/Phone Number"
-}
-
-Extract as many rows as possible from the provided text. Match values accurately under their corresponding dynamic headers. Return ONLY a valid JSON array of objects. Do not include any text other than the JSON output.
-
---- EXTRACTED PDF TEXT ---
-${extractedText}`
-          });
-        } else {
-          // Fallback to sending raw PDF
-          contents.push({
+        const contents: any[] = [
+          {
             inlineData: {
               mimeType: "application/pdf",
               data: pdfBase64,
             },
-          });
-          contents.push({
-            text: "You are an expert data parser. Please extract all student records from this Pragjyotish College BCA admission/student list PDF. Output as a JSON array of student objects. Each object MUST strictly follow this JSON schema:\n\n" +
+          },
+          {
+            text: "You are an expert data parser. Please extract all student records from this Pragjyotish College BCA admission/student list PDF (which may have multiple pages and dynamic table headers). Output as a JSON array of student objects. Each object MUST strictly follow this JSON schema:\n\n" +
                   "{\n" +
                   "  \"formNumber\": \"string containing the Form Number (e.g., 2632862)\",\n" +
                   "  \"registrationId\": \"string containing the Registration ID (e.g., 26011453)\",\n" +
-                  "  \"rollNumber\": \"string containing the Roll Number if present\",\n" +
-                  "  \"enrollmentNumber\": \"string containing the Enrollment Number if present\",\n" +
-                  "  \"semester\": \"string containing Semester (e.g., 1st Semester, 3rd Semester, 5th Semester)\",\n" +
-                  "  \"batch\": \"string containing the Batch/Year (e.g., 2024–2027)\",\n" +
+                  "  \"rollNumber\": \"string containing the Roll Number (e.g., 2401, 2405, etc.) if visible in the document\",\n" +
+                  "  \"enrollmentNumber\": \"string containing the Enrollment Number (e.g., PC/2024/005, etc.) if visible in the document\",\n" +
+                  "  \"semester\": \"string containing Semester (e.g., '1st Semester', '3rd Semester', '5th Semester'). Map/normalize values like '1st', 'sem 1', 'first sem' to '1st Semester'\",\n" +
+                  "  \"batch\": \"string containing the Batch/Academic Year (e.g., '2024–2027', '2025–2028', '2026–2029') if found or can be inferred\",\n" +
                   "  \"programmeName\": \"string containing the Programme Name (usually BACHELOR OF COMPUTER APPLICATIONS(COMPUTER APPLICATION))\",\n" +
                   "  \"transactionMode\": \"string containing Transaction Mode (usually CASH or ONLINE)\",\n" +
                   "  \"admissionCategory\": \"string containing Admission Category (usually GENERAL)\",\n" +
@@ -2634,8 +2597,8 @@ ${extractedText}`
                   "  \"mobile\": \"string containing Mobile/Phone Number\"\n" +
                   "}\n\n" +
                   "Extract as many rows as possible from all pages of the document. Return ONLY a valid JSON array. Do not wrap in markdown codeblocks. Do not include any text other than the JSON output."
-          });
-        }
+          }
+        ];
 
         response = await ai.models.generateContent({
           model: modelToUse,
