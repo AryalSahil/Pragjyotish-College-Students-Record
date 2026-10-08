@@ -14,6 +14,9 @@ export async function parseJsonResponse<T = any>(res: Response): Promise<T> {
       if (text.includes("The page could not be found") || res.status === 404) {
         throw new Error("API endpoint not found (HTTP 404). Please verify that backend API routes are deployed.");
       }
+      if (text.includes("FUNCTION_INVOCATION_FAILED")) {
+        throw new Error("Serverless function invocation failed. Please check your database connection credentials (DATABASE_URL or POSTGRES_URL) in Vercel project settings.");
+      }
       throw new Error(text.slice(0, 150) || `Server returned error (${res.status})`);
     }
 

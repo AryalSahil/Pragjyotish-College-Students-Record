@@ -10,7 +10,11 @@ declare global {
 
 export const createPool = () => {
   if (!global._postgresPool) {
-    const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+    const connectionString =
+      process.env.DATABASE_URL ||
+      process.env.POSTGRES_URL ||
+      process.env.POSTGRES_PRISMA_URL ||
+      process.env.POSTGRES_URL_NON_POOLING;
 
     if (connectionString) {
       const isLocal = connectionString.includes('localhost') || connectionString.includes('127.0.0.1');
@@ -18,7 +22,8 @@ export const createPool = () => {
         connectionString,
         ssl: isLocal ? false : { rejectUnauthorized: false },
         max: process.env.VERCEL ? 3 : 10,
-        connectionTimeoutMillis: 15000,
+        connectionTimeoutMillis: 5000,
+        idleTimeoutMillis: 10000,
       });
     } else {
       const isUnixSocket = Boolean(process.env.SQL_HOST && process.env.SQL_HOST.startsWith('/'));
@@ -33,7 +38,8 @@ export const createPool = () => {
         port: process.env.SQL_PORT ? parseInt(process.env.SQL_PORT, 10) : 5432,
         ssl: shouldUseSsl ? { rejectUnauthorized: false } : undefined,
         max: process.env.VERCEL ? 3 : 10,
-        connectionTimeoutMillis: 15000,
+        connectionTimeoutMillis: 5000,
+        idleTimeoutMillis: 10000,
       });
     }
 
