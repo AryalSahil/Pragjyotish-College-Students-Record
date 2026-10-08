@@ -37,6 +37,14 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
+// Handle malformed JSON request bodies with clean JSON error envelope instead of HTML error page
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err instanceof SyntaxError && "body" in err && (err as any).status === 400) {
+    return res.status(400).json({ error: "Malformed JSON payload in request body" });
+  }
+  next(err);
+});
+
 // Prevent any API response caching to ensure real-time accuracy
 app.use("/api", (req, res, next) => {
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
@@ -667,14 +675,24 @@ app.post("/api/public/login", async (req, res) => {
 
 // Verify JWT token validity
 app.get("/api/admin/verify", requireJWT, (req: AuthRequest, res) => {
-  res.json({ valid: true, admin: req.admin });
+  try {
+    res.json({ valid: true, admin: req.admin });
+  } catch (err: any) {
+    console.error("Token verify error:", err);
+    res.status(500).json({ error: "Failed to verify administrator credentials" });
+  }
 });
 
 // Admin Log Out Trigger
 app.post("/api/admin/logout", requireJWT, async (req: AuthRequest, res) => {
-  const email = req.admin?.email || "admin";
-  await logActivity(email, "Logout", "Logged out of administrator session.");
-  res.json({ success: true });
+  try {
+    const email = req.admin?.email || "admin";
+    await logActivity(email, "Logout", "Logged out of administrator session.");
+    res.json({ success: true, message: "Logged out successfully" });
+  } catch (err: any) {
+    console.error("Logout error:", err);
+    res.json({ success: true, message: "Logged out" });
+  }
 });
 
 // Admin Settings fetching
@@ -1880,77 +1898,82 @@ function mapCsvRowToStudentRecord(headers: string[], row: string[]): any {
 
 // GET /api/admin/students/csv-template - Download starter CSV template for student records
 app.get("/api/admin/students/csv-template", requireJWT as any, (req, res) => {
-  const headers = [
-    "Form Number",
-    "Registration ID",
-    "Roll Number",
-    "Enrollment Number",
-    "Full Name",
-    "Gender",
-    "Category",
-    "Admission Category",
-    "Programme",
-    "Major Subject",
-    "Minor Subject",
-    "Semester",
-    "Batch",
-    "Email Address",
-    "Mobile Number",
-    "Transaction Mode",
-    "Status"
-  ];
+  try {
+    const headers = [
+      "Form Number",
+      "Registration ID",
+      "Roll Number",
+      "Enrollment Number",
+      "Full Name",
+      "Gender",
+      "Category",
+      "Admission Category",
+      "Programme",
+      "Major Subject",
+      "Minor Subject",
+      "Semester",
+      "Batch",
+      "Email Address",
+      "Mobile Number",
+      "Transaction Mode",
+      "Status"
+    ];
 
-  const sampleRows = [
-    [
-      "PC-BCA-2026-001",
-      "REG-2026-101",
-      "BCA-01",
-      "EN-2026-001",
-      "RAHUL SHARMA",
-      "MALE",
-      "GENERAL",
-      "GENERAL",
-      "BACHELOR OF COMPUTER APPLICATIONS(COMPUTER APPLICATION)",
-      "Computer Science",
-      "Mathematics",
-      "1st Semester",
-      "2026–2029",
-      "rahul.sharma@example.com",
-      "9876543210",
-      "ONLINE",
-      "Active"
-    ],
-    [
-      "PC-BCA-2026-002",
-      "REG-2026-102",
-      "BCA-02",
-      "EN-2026-002",
-      "PRIYA DEVI",
-      "FEMALE",
-      "OBC",
-      "GENERAL",
-      "BACHELOR OF COMPUTER APPLICATIONS(COMPUTER APPLICATION)",
-      "Computer Science",
-      "Statistics",
-      "1st Semester",
-      "2026–2029",
-      "priya.devi@example.com",
-      "9876543211",
-      "CASH",
-      "Active"
-    ]
-  ];
+    const sampleRows = [
+      [
+        "PC-BCA-2026-001",
+        "REG-2026-101",
+        "BCA-01",
+        "EN-2026-001",
+        "RAHUL SHARMA",
+        "MALE",
+        "GENERAL",
+        "GENERAL",
+        "BACHELOR OF COMPUTER APPLICATIONS(COMPUTER APPLICATION)",
+        "Computer Science",
+        "Mathematics",
+        "1st Semester",
+        "2026–2029",
+        "rahul.sharma@example.com",
+        "9876543210",
+        "ONLINE",
+        "Active"
+      ],
+      [
+        "PC-BCA-2026-002",
+        "REG-2026-102",
+        "BCA-02",
+        "EN-2026-002",
+        "PRIYA DEVI",
+        "FEMALE",
+        "OBC",
+        "GENERAL",
+        "BACHELOR OF COMPUTER APPLICATIONS(COMPUTER APPLICATION)",
+        "Computer Science",
+        "Statistics",
+        "1st Semester",
+        "2026–2029",
+        "priya.devi@example.com",
+        "9876543211",
+        "CASH",
+        "Active"
+      ]
+    ];
 
-  const escapeCsv = (val: any) => `"${String(val ?? "").replace(/"/g, '""')}"`;
-  let csv = "\uFEFF";
-  csv += headers.map(escapeCsv).join(",") + "\r\n";
-  for (const row of sampleRows) {
-    csv += row.map(escapeCsv).join(",") + "\r\n";
+    const escapeCsv = (val: any) => `"${String(val ?? "").replace(/"/g, '""')}"`;
+    let csv = "\uFEFF";
+    csv += headers.map(escapeCsv).join(",") + "\r\n";
+    for (const row of sampleRows) {
+      csv += row.map(escapeCsv).join(",") + "\r\n";
+    }
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="student_import_template.csv"');
+    res.status(200).send(csv);
+  } catch (err: any) {
+    console.error("CSV template error:", err);
+    res.status(500).json({ error: "Failed to generate CSV template" });
   }
-
-  res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader("Content-Disposition", 'attachment; filename="student_import_template.csv"');
-  res.status(200).send(csv);
 });
 
 // POST /api/admin/students/upload-csv-preview - Parse and validate CSV data before committing
@@ -2963,23 +2986,26 @@ app.post("/api/admin/import/confirm", requireJWT, async (req: AuthRequest, res) 
 });
 
 // ---------------------------------------------------------
-// Catch-all handler for unknown /api/* routes - guarantees JSON response, never plain text or HTML
+// Catch-all handler for unknown /api and /api/* routes - guarantees JSON response, never plain text or HTML
 // ---------------------------------------------------------
-app.all("/api/*", (req, res) => {
+app.all(["/api", "/api/*"], (req, res) => {
+  res.setHeader("Content-Type", "application/json");
   res.status(404).json({
-    error: `API route ${req.method} ${req.path} not found`
+    error: `API endpoint ${req.method} ${req.originalUrl || req.url || req.path} not found`
   });
 });
 
 // ---------------------------------------------------------
-// Global Express error handler for API routes - guarantees 500 JSON response on unhandled exceptions
+// Global Express error handler for API routes - guarantees strictly JSON envelope on unhandled exceptions
 // ---------------------------------------------------------
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error("Unhandled error in Express pipeline:", err);
   if (res.headersSent) {
     return next(err);
   }
-  res.status(500).json({
+  res.setHeader("Content-Type", "application/json");
+  const statusCode = typeof err?.status === "number" ? err.status : (typeof err?.statusCode === "number" ? err.statusCode : 500);
+  res.status(statusCode).json({
     error: err?.message || "Internal server error"
   });
 });
