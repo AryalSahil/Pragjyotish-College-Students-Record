@@ -1,0 +1,6 @@
+{
+  "name": "Pragjyotish College BCA Student Records",
+  "description": "Official portal for Pragjyotish College BCA Student Records management and public verification.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
