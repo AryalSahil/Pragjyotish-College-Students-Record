@@ -5,6 +5,7 @@
 
 import { useState, useEffect } from "react";
 import { Wrench } from "lucide-react";
+import { SpeedInsights } from "@vercel/speed-insights/react";
 import Navbar from "./components/Navbar.tsx";
 import Home from "./components/Home.tsx";
 import SearchStudents from "./components/SearchStudents.tsx";
@@ -182,6 +183,7 @@ export default function App() {
             </span>
           </div>
         </footer>
+        <SpeedInsights />
       </div>
     );
   }
@@ -284,7 +286,7 @@ export default function App() {
           </div>
         </div>
       </footer>
+      <SpeedInsights />
     </div>
   );
 }
-
